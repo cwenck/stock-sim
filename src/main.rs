@@ -3,19 +3,21 @@ use std::collections::HashMap;
 use io::read_lines;
 use number::Percent;
 use pricing::{
-    AlternatingPricingStrategy, Period, PriceChange, PriceHistoryDescriptor, PriceHistoryVariants,
-    PricingStrategy, SamplingPricingStrategy,
+    AlternatingPricingStrategy, Period, PriceChange, PriceHistory, PriceHistoryDescriptor,
+    PriceHistoryVariants, PricingStrategy, SamplingPricingStrategy,
 };
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use stats::{
-    calculate_statistic, AveragePriceChange, ComputedStatistic, MedianPriceChange,
-    StandardDeviationPriceChange, StandardDeviationPriceChangeContext,
+    calculate_statistic, AveragePriceChange, ComputedStatistic, MatchingPriceChangeRatio,
+    MatchingPriceChangeRatioContext, MedianPriceChange, StandardDeviationPriceChange,
+    StandardDeviationPriceChangeContext,
 };
 
 mod io;
 mod number;
 mod pricing;
 mod stats;
+mod types;
 
 fn load_daily_price_changes() -> Vec<PriceChange> {
     let lines = read_lines("resources/daily-changes.csv").expect("Failed to read file");
@@ -37,7 +39,7 @@ fn load_daily_price_changes() -> Vec<PriceChange> {
         .collect()
 }
 
-const SIMULATIONS: u64 = 10000;
+const SIMULATIONS: u64 = 10_000;
 
 fn main() {
     println!("Running with {} simulations", SIMULATIONS);
@@ -60,89 +62,108 @@ fn main() {
 
     let descriptors = Vec::from(price_history_variants[0].descriptors());
 
-    let averages: HashMap<_, _> = calculate_statistic(&price_history_variants, None)
-        .map(|value: ComputedStatistic<AveragePriceChange>| {
-            (value.descriptor(), value.statistic().average())
-        })
-        .collect();
+    let averages: HashMap<PriceHistoryDescriptor, AveragePriceChange> =
+        calculate_statistic(&price_history_variants, None)
+            .map(|value: ComputedStatistic<AveragePriceChange>| {
+                (value.descriptor(), value.statistic().clone())
+            })
+            .collect();
 
-    let stdev_context: HashMap<_, _> = averages
-        .iter()
-        .map(|(&key, &val)| (key, StandardDeviationPriceChangeContext::new(val)))
-        .collect();
+    let stdev_context: HashMap<PriceHistoryDescriptor, StandardDeviationPriceChangeContext> =
+        averages
+            .iter()
+            .map(|(&key, &val)| (key, StandardDeviationPriceChangeContext::new(val.average())))
+            .collect();
 
-    let stdevs: HashMap<_, _> = calculate_statistic(&price_history_variants, Some(&stdev_context))
-        .map(|value: ComputedStatistic<StandardDeviationPriceChange>| {
-            (value.descriptor(), value.statistic().stdev())
-        })
-        .collect();
+    let stdevs: HashMap<PriceHistoryDescriptor, StandardDeviationPriceChange> =
+        calculate_statistic(&price_history_variants, Some(&stdev_context))
+            .map(|value: ComputedStatistic<StandardDeviationPriceChange>| {
+                (value.descriptor(), value.statistic().clone())
+            })
+            .collect();
 
-    let medians: HashMap<_, _> = calculate_statistic(&price_history_variants, None)
-        .map(|value: ComputedStatistic<MedianPriceChange>| {
-            (value.descriptor(), value.statistic().median())
-        })
-        .collect();
+    let medians: HashMap<PriceHistoryDescriptor, MedianPriceChange> =
+        calculate_statistic(&price_history_variants, None)
+            .map(|value: ComputedStatistic<MedianPriceChange>| {
+                (value.descriptor(), value.statistic().clone())
+            })
+            .collect();
 
-    // median.for_each(|item: ComputedStatistic<MedianPriceChange>| {
-    //     let median_price_change = item.statistic().median();
-    //     let descriptor = item.descriptor();
-    //     println!(
-    //         "Leverage: {:.1}, Median: {:+.4}",
-    //         descriptor.leverage().amount(),
-    //         median_price_change.annualized(period)
-    //     )
-    // });
+    let ratio_contexts: HashMap<PriceHistoryDescriptor, MatchingPriceChangeRatioContext> =
+        descriptors
+            .iter()
+            .map(|&descriptor| {
+                let context =
+                    MatchingPriceChangeRatioContext::new(move |price_change: PriceChange| {
+                        price_change.annualized_return(period).percent_change()
+                            >= Percent::from_percent(15.0).into()
+                    });
+                (descriptor, context)
+            })
+            .collect();
+
+    let _loss_ratios = calculate_statistic::<MatchingPriceChangeRatio, _>(
+        &price_history_variants,
+        Some(&ratio_contexts),
+    )
+    .map(|value| (value.descriptor(), value.statistic().clone()))
+    .collect::<HashMap<_, _>>();
 
     let mut stats: Vec<StatGroup> = descriptors
         .iter()
-        .map(|descriptor| StatGroup {
-            descriptor: *descriptor,
-            average: averages[descriptor],
-            stdev: stdevs[descriptor],
-            median: medians[descriptor],
+        .map(|descriptor| {
+            let percentiles = (0..10)
+                .into_iter()
+                .map(|i| i as f64 / 20.0)
+                .map(|percentile| medians[descriptor].percentile(Percent::from_decimal(percentile)))
+                // .map(|price_change| price_change.annualized_return(period))
+                .collect::<Vec<_>>();
+
+            StatGroup {
+                descriptor: *descriptor,
+                average: averages[descriptor].average(),
+                annualized_average: averages[descriptor].annualized_average(),
+                stdev: stdevs[descriptor].stdev(),
+                median: medians[descriptor].median(),
+                min: medians[descriptor].min(),
+                max: medians[descriptor].max(),
+                inner_quartile_range: medians[descriptor].inner_quartile_range(),
+                percentiles,
+            }
         })
         .collect();
     stats.sort();
 
     stats.iter().for_each(|stat_group| {
         println!(
-            "Years: {:.1} | Leverage: {: <4.1} | Median: {: >+20.4} | Avg: {: >+20.4} | Stdev: {: >20.4} | Sharpe Ratio: {:.4}",
+            "Years: {:.1} | Leverage: {: <4.1} | Min/Max {:.4} :: {:.4} | IQR: {:.4} |  Percentiles: {:.4}",
             stat_group.descriptor.period().as_years(),
             stat_group.descriptor.leverage().amount(),
-            stat_group.median.annualized_return(period),
-            stat_group.average.annualized_return(period),
-            stat_group.stdev.annualized_stdev(period),
-            stat_group.average.percent_change().as_decimal() / stat_group.stdev.percent_change().as_decimal()
+            stat_group.min,
+            stat_group.max,
+            stat_group.inner_quartile_range,
+            PriceHistory::from(stat_group.percentiles.as_slice()),
         )
     });
-
-    // average.iter().for_each(|(descriptor, value)| {
-    //     println!(
-    //         "Leverage: {:.1}, Avg: {:+.4}",
-    //         descriptor.leverage().amount(),
-    //         // descriptor.period().as_years().unwrap(),
-    //         // avg_price_change,
-    //         value.annualized(period)
-    //     )
-    // });
-
-    // stdev.iter().for_each(|(descriptor, value)| {
-    //     println!(
-    //         "Leverage: {:.1}, Std-dev: {:+.4}",
-    //         descriptor.leverage().amount(),
-    //         // descriptor.period().as_years().unwrap(),
-    //         // avg_price_change,
-    //         value.annualized(period)
-    //     )
-    // });
 }
 
 #[derive(Debug, Clone)]
 struct StatGroup {
     descriptor: PriceHistoryDescriptor,
     average: PriceChange,
+    annualized_average: PriceChange,
     stdev: PriceChange,
     median: PriceChange,
+    min: PriceChange,
+    max: PriceChange,
+    inner_quartile_range: PriceChange,
+    percentiles: Vec<PriceChange>,
+}
+
+impl StatGroup {
+    fn sharpe_ratio(&self) -> f64 {
+        self.average.percent_change().as_decimal() / self.stdev.percent_change().as_decimal()
+    }
 }
 
 impl PartialEq for StatGroup {

@@ -23,7 +23,12 @@ impl Percent {
     }
 
     pub fn from_multiplier(multipler: f64) -> Percent {
-        Percent(multipler - 1.0)
+        let decimal = match multipler {
+            x if x < 0.0 => -1.0,
+            _ => multipler - 1.0,
+        };
+
+        Percent(decimal)
     }
 
     pub fn as_multiplier(&self) -> f64 {

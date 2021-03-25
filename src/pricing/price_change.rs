@@ -9,6 +9,8 @@ pub struct PriceChange {
     percent_change: Percent,
 }
 
+// TODO : make a type distinction between an annualized price change, a daily price change, and a total price change
+
 #[allow(dead_code)]
 impl PriceChange {
     pub fn new(percent_change: Percent) -> PriceChange {
@@ -30,16 +32,16 @@ impl PriceChange {
     }
 
     pub fn annualized_return(&self, period: Period) -> PriceChange {
-        let multiplier = self.percent_change().as_multiplier();
-        let annualized_multiplier = f64::powf(multiplier, 1.0 / period.as_years());
+        let total_multiplier = self.percent_change().as_multiplier();
+        let annualized_multiplier = f64::powf(total_multiplier, 1.0 / period.as_years());
         Percent::from_multiplier(annualized_multiplier).into()
     }
 
-    pub fn annualized_stdev(&self, period: Period) -> PriceChange {
-        // TODO : Fix this. Seems wrong.
-        let decimal = self.percent_change().as_decimal();
-        let annualized_decimal = decimal / f64::sqrt(period.as_years());
-        Percent::from_decimal(annualized_decimal).into()
+    /// Computes the total return from an annualized price change.
+    pub fn total_return(&self, period: Period) -> PriceChange {
+        let annualized_multiplier = self.percent_change().as_multiplier();
+        let total_multiplier = f64::powf(annualized_multiplier, period.as_years());
+        Percent::from_multiplier(total_multiplier).into()
     }
 
     pub fn compose(&self, other: PriceChange) -> PriceChange {

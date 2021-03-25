@@ -85,7 +85,7 @@ where
             .map(|(i, price_change)| {
                 let descriptor = descriptors[i];
                 let ctx = context.map(|map| &map[&descriptor]);
-                T::new(price_change, ctx)
+                T::new(price_change, &descriptor, ctx)
             })
             .collect();
 
@@ -104,29 +104,45 @@ pub trait PriceHistoryStatisticValue: Send + Sync {
     type Context;
 
     fn identity() -> Self;
-    fn new(price_change: PriceChange, context: Option<&Self::Context>) -> Self;
+    fn new(
+        price_change: PriceChange,
+        descriptor: &PriceHistoryDescriptor,
+        context: Option<&Self::Context>,
+    ) -> Self;
     fn reduce(a: Self, b: Self, context: Option<&Self::Context>) -> Self;
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct AveragePriceChange {
     price_change_sum: f64,
+    annualized_price_change_sum: f64,
     count: u64,
 }
 
 impl AveragePriceChange {
     pub fn average(&self) -> PriceChange {
-        let summed_price_change = self.price_change_sum;
-        Percent::from_decimal(summed_price_change / (self.count as f64)).into()
+        Percent::from_decimal(self.price_change_sum / (self.count as f64)).into()
+    }
+
+    pub fn annualized_average(&self) -> PriceChange {
+        Percent::from_decimal(self.annualized_price_change_sum / (self.count as f64)).into()
     }
 }
 
 impl PriceHistoryStatisticValue for AveragePriceChange {
     type Context = ();
 
-    fn new(price_change: PriceChange, _context: Option<&Self::Context>) -> Self {
+    fn new(
+        price_change: PriceChange,
+        descriptor: &PriceHistoryDescriptor,
+        _context: Option<&Self::Context>,
+    ) -> Self {
         Self {
             price_change_sum: price_change.percent_change().as_decimal(),
+            annualized_price_change_sum: price_change
+                .annualized_return(descriptor.period())
+                .percent_change()
+                .as_decimal(),
             count: 1,
         }
     }
@@ -134,6 +150,7 @@ impl PriceHistoryStatisticValue for AveragePriceChange {
     fn identity() -> Self {
         Self {
             price_change_sum: 0.0,
+            annualized_price_change_sum: 0.0,
             count: 0,
         }
     }
@@ -141,6 +158,8 @@ impl PriceHistoryStatisticValue for AveragePriceChange {
     fn reduce(a: Self, b: Self, _context: Option<&Self::Context>) -> Self {
         Self {
             price_change_sum: a.price_change_sum + b.price_change_sum,
+            annualized_price_change_sum: a.annualized_price_change_sum
+                + b.annualized_price_change_sum,
             count: a.count + b.count,
         }
     }
@@ -175,7 +194,11 @@ impl StandardDeviationPriceChange {
 impl PriceHistoryStatisticValue for StandardDeviationPriceChange {
     type Context = StandardDeviationPriceChangeContext;
 
-    fn new(price_change: PriceChange, context: Option<&Self::Context>) -> Self {
+    fn new(
+        price_change: PriceChange,
+        descriptor: &PriceHistoryDescriptor,
+        context: Option<&Self::Context>,
+    ) -> Self {
         let context = context.expect("Expected a context");
 
         let diff_from_mean = context.average - price_change.percent_change().as_decimal();
@@ -197,77 +220,6 @@ impl PriceHistoryStatisticValue for StandardDeviationPriceChange {
         Self {
             variance_sum: a.variance_sum + b.variance_sum,
             count: a.count + b.count,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct MedianPriceChange {
-    price_changes: Vec<PriceChange>,
-    count: u64,
-}
-
-impl MedianPriceChange {
-    pub fn median(&self) -> PriceChange {
-        let half = (self.count / 2) as usize;
-        let odd = self.count % 2 == 1;
-
-        if odd {
-            self.price_changes[half]
-        } else {
-            let percent_sum = self.price_changes[half - 1].percent_change()
-                + self.price_changes[half].percent_change();
-            let avg_decimal = percent_sum.as_decimal() / 2.0;
-            Percent::from_decimal(avg_decimal).into()
-        }
-    }
-}
-
-impl PriceHistoryStatisticValue for MedianPriceChange {
-    type Context = ();
-
-    fn new(price_change: PriceChange, _context: Option<&Self::Context>) -> Self {
-        Self {
-            price_changes: vec![price_change],
-            count: 1,
-        }
-    }
-
-    fn identity() -> Self {
-        Self {
-            price_changes: Vec::new(),
-            count: 0,
-        }
-    }
-
-    fn reduce(a: Self, b: Self, _context: Option<&Self::Context>) -> Self {
-        let count = a.count + b.count;
-        let mut merged_price_changes = Vec::with_capacity(count as usize);
-
-        let mut cursor_a = 0;
-        let mut cursor_b = 0;
-
-        while cursor_a < a.price_changes.len() && cursor_b < b.price_changes.len() {
-            if a.price_changes[cursor_a] < b.price_changes[cursor_b] {
-                merged_price_changes.push(a.price_changes[cursor_a]);
-                cursor_a += 1;
-            } else {
-                merged_price_changes.push(b.price_changes[cursor_b]);
-                cursor_b += 1;
-            }
-        }
-
-        if cursor_a < a.price_changes.len() {
-            let remaining = &a.price_changes[cursor_a..];
-            merged_price_changes.extend_from_slice(remaining);
-        } else if cursor_b < b.price_changes.len() {
-            let remaining = &b.price_changes[cursor_b..];
-            merged_price_changes.extend_from_slice(remaining);
-        }
-
-        Self {
-            price_changes: merged_price_changes,
-            count,
         }
     }
 }
