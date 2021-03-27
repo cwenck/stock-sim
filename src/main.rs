@@ -53,12 +53,12 @@ fn main() {
     // let pricing_strategy = AlternatingPricingStrategy::new(&price_change_options);
 
     let period = Period::Years(5);
-    let price_history_variants: Vec<_> = (0..SIMULATIONS)
+    let price_history_variants = (0..SIMULATIONS)
         .into_par_iter()
         .map(|_| pricing_strategy.calculate_price_history(0..period.as_days()))
         // .inspect(|price_history| println!("{:+.3}", price_history))
         .map(|price_history| PriceHistoryVariants::new(price_history, period))
-        .collect();
+        .collect::<Vec<_>>();
 
     let descriptors = Vec::from(price_history_variants[0].descriptors());
 
